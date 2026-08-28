@@ -1,0 +1,27 @@
+# Model weights and exported runtimes
+*.pt
+*.pth
+*.onnx
+*.engine
+
+# Datasets and generated training artifacts
+dataset_split/
+runs/
+result/
+cross_validation_results/
+inference_results*/
+
+# Framework caches and Python artifacts
+*.cache
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# Extracted archive metadata and local OS files
+__MACOSX/
+.DS_Store
+
+# Local environments and scratch work
+.venv/
+.scratch/
