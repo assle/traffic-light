@@ -9,6 +9,7 @@ dataset_split/
 runs/
 result/
 cross_validation_results/
+cross_validation_results_revised/
 inference_results*/
 
 # Framework caches and Python artifacts

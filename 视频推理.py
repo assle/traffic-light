@@ -5,19 +5,27 @@ import numpy as np
 import yaml
 from pathlib import Path
 from ultralytics import YOLO
+import matplotlib
+
+matplotlib.use("Agg")
+
 import matplotlib.pyplot as plt
 import seaborn as sns
 from collections import defaultdict
 import json
 
-# ==================== 配置参数（请修改这里） ====================
-POS_MODEL_PATH = "/Users/xiongere/Desktop/信号灯检测/best.pt"       # 位置模型路径
-COLOR_MODEL_PATH = "/Users/xiongere/Desktop/信号灯检测/best-26.pt"  # 颜色模型路径
-VIDEO_INPUT = "/Users/xiongere/Desktop/信号灯检测/output_a.mp4"   # 输入视频路径
-VIDEO_OUTPUT = "cross_validation_results/output_video.mp4"          # 输出视频路径
-CLASS_NAMES_PATH = "/Users/xiongere/Desktop/信号灯检测/signal.yaml" # 颜色类别yaml文件
+# ==================== 配置参数 ====================
+ROOT = Path(__file__).resolve().parent
+POS_MODEL_PATH = ROOT / "best.pt"
+COLOR_MODEL_PATH = ROOT / "best-26.pt"
+VIDEO_INPUT = (
+    ROOT.parent / "taps-ga-yolo-traffic-light" / "dataset"
+    / "信号灯数据" / "output_a.mp4"
+)
+OUTPUT_DIR = ROOT / "cross_validation_results_revised"
+VIDEO_OUTPUT = OUTPUT_DIR / "output_a_revised_statistics.mp4"
+CLASS_NAMES_PATH = ROOT / "signal.yaml"
 CONF_THRES = 0.5                                                    # 置信度阈值
-OUTPUT_DIR = "cross_validation_results"                             # 输出文件夹
 SAMPLE_INTERVAL = 1                                                 # 采样间隔（每N帧处理一帧，1表示每帧都处理）
 MAX_FRAMES = 0                                                      # 最大处理帧数（0表示处理全部）
 # ================================================================
@@ -73,7 +81,7 @@ def parse_color_output(colors_en):
 # ==================== 调用位置模型 ====================
 def run_position_model(model, image, conf_threshold=0.5):
     try:
-        results = model(image)
+        results = model(image, verbose=False)
         if results[0].probs is not None:
             probs = results[0].probs
             top1 = probs.top1
@@ -92,7 +100,7 @@ def run_position_model(model, image, conf_threshold=0.5):
 # ==================== 调用颜色模型 ====================
 def run_color_model(model, image, conf_threshold=0.5):
     try:
-        results = model(image, conf=conf_threshold)
+        results = model(image, conf=conf_threshold, verbose=False)
         colors_en = []
         if len(results) > 0 and results[0].boxes is not None:
             boxes = results[0].boxes
@@ -149,11 +157,28 @@ def cross_validate_all(positions, colors):
             pair_results.append({"index": i, "position": pos, "color": col,
                                 "passed": res["passed"], "reason": res["reason"]})
 
-    all_passed = all(p["passed"] for p in pair_results)
+    strict_all_passed = all(p["passed"] for p in pair_results)
+    # 最终输出口径：每个灯位都必须有一个同序颜色且规则一致。
+    # 颜色模型多出的结果不再拖累整帧统计，但仍保留在pair_results中审计。
+    final_all_passed = (
+        n_pos > 0
+        and n_col >= n_pos
+        and all(pair_results[i]["passed"] for i in range(n_pos))
+    )
+    for i, pair in enumerate(pair_results):
+        pair["included_in_final"] = (
+            final_all_passed and i < n_pos and pair["passed"]
+        )
     passed_count = sum(1 for p in pair_results if p["passed"])
+    ignored_extra_colors = max(0, n_col - n_pos) if final_all_passed else 0
 
     return {
-        "all_passed": all_passed,
+        "all_passed": final_all_passed,
+        "strict_all_passed": strict_all_passed,
+        "corrected_by_surplus_filter": (
+            final_all_passed and not strict_all_passed
+        ),
+        "ignored_extra_colors": ignored_extra_colors,
         "pair_results": pair_results,
         "total_pairs": len(pair_results),
         "passed_pairs": passed_count,
@@ -200,7 +225,12 @@ def draw_on_frame(frame, result):
 
     # 整体状态
     all_pass = result["validation"]["all_passed"]
-    status_text = "ALL PASS" if all_pass else "FAIL"
+    corrected = result["validation"]["corrected_by_surplus_filter"]
+    status_text = (
+        "PASS (SURPLUS IGNORED)" if corrected
+        else "ALL PASS" if all_pass
+        else "FAIL"
+    )
     color = (0, 255, 0) if all_pass else (0, 0, 255)
     cv2.putText(frame, f"Frame: {result['frame_idx']} | Status: {status_text}", 
                 (15, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.9, color, 2)
@@ -241,6 +271,15 @@ def generate_video_reports(all_results, output_dir):
     total_frames = len(all_results)
     passed_frames = sum(1 for r in all_results if r["validation"]["all_passed"])
     failed_frames = total_frames - passed_frames
+    strict_passed_frames = sum(
+        1 for r in all_results if r["validation"]["strict_all_passed"])
+    corrected_frames = sum(
+        1 for r in all_results
+        if r["validation"]["corrected_by_surplus_filter"]
+    )
+    ignored_extra_colors = sum(
+        r["validation"]["ignored_extra_colors"] for r in all_results
+    )
 
     total_pairs = sum(r["validation"]["total_pairs"] for r in all_results)
     passed_pairs = sum(r["validation"]["passed_pairs"] for r in all_results)
@@ -381,6 +420,9 @@ def generate_video_reports(all_results, output_dir):
         "total_frames": total_frames,
         "passed_frames": passed_frames,
         "failed_frames": failed_frames,
+        "strict_passed_frames": strict_passed_frames,
+        "corrected_frames": corrected_frames,
+        "ignored_extra_colors": ignored_extra_colors,
         "total_pairs": total_pairs,
         "passed_pairs": passed_pairs,
         "failed_pairs": failed_pairs
@@ -396,6 +438,12 @@ def save_json_results(all_results, stats, output_dir):
             "passed_frames": stats["passed_frames"],
             "failed_frames": stats["failed_frames"],
             "frame_pass_rate": f"{stats['passed_frames']/stats['total_frames']*100:.1f}%",
+            "strict_passed_frames": stats["strict_passed_frames"],
+            "strict_frame_pass_rate": (
+                f"{stats['strict_passed_frames']/stats['total_frames']*100:.1f}%"
+            ),
+            "corrected_frames": stats["corrected_frames"],
+            "ignored_extra_colors": stats["ignored_extra_colors"],
             "total_pairs": stats["total_pairs"],
             "passed_pairs": stats["passed_pairs"],
             "failed_pairs": stats["failed_pairs"],
@@ -412,6 +460,11 @@ def save_json_results(all_results, stats, output_dir):
             "raw_colors": r["raw_colors_en"],
             "parsed_colors": r["parsed_colors"],
             "all_passed": r["validation"]["all_passed"],
+            "strict_all_passed": r["validation"]["strict_all_passed"],
+            "corrected_by_surplus_filter": (
+                r["validation"]["corrected_by_surplus_filter"]
+            ),
+            "ignored_extra_colors": r["validation"]["ignored_extra_colors"],
             "lights": []
         }
         for p in r["validation"]["pair_results"]:
@@ -420,6 +473,7 @@ def save_json_results(all_results, stats, output_dir):
                 "position": p["position"],
                 "color": p["color"],
                 "passed": p["passed"],
+                "included_in_final": p["included_in_final"],
                 "reason": p["reason"]
             })
         json_data["frames"].append(frame_data)
@@ -446,7 +500,7 @@ def main():
 
     # 2. 打开视频
     print(f"\n[2/5] 打开视频: {VIDEO_INPUT}")
-    cap = cv2.VideoCapture(VIDEO_INPUT)
+    cap = cv2.VideoCapture(str(VIDEO_INPUT))
     if not cap.isOpened():
         print("  错误：无法打开视频文件！")
         return
@@ -468,7 +522,7 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
     
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    out = cv2.VideoWriter(VIDEO_OUTPUT, fourcc, fps, (width, height))
+    out = cv2.VideoWriter(str(VIDEO_OUTPUT), fourcc, fps, (width, height))
 
     # 4. 逐帧处理
     print(f"\n[4/5] 开始处理视频帧...")
