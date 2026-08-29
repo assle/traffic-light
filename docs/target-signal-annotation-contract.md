@@ -8,7 +8,7 @@
 
 ### 采集元数据
 
-采集工具负责生成元数据，标注人员无需重复填写。
+站点分组与关键帧工作流负责生成元数据，标注人员无需重复填写。工作流的输入、校验、抽帧与插值规则见 [站点分组与关键帧标注工作流](target-signal-sampling-workflow.md)。
 
 ```json
 {"frame_id":"a-st01-000123","image_path":"frames/a-st01-000123.jpg","camera":"A","video_id":"a-trip-01","frame_index":123,"timestamp_ms":12300,"section_id":"station-01","split":"train","image_width":1920,"image_height":1080}
